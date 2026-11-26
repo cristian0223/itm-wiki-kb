@@ -1,0 +1,9 @@
+{
+  "name": "itm-wiki-evidencias",
+  "private": true,
+  "type": "module",
+  "description": "Generador automatico de capturas de evidencia (Playwright)",
+  "dependencies": {
+    "playwright": "1.47.2"
+  }
+}

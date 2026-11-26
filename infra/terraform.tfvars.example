@@ -1,0 +1,10 @@
+# Opcional: copie como terraform.tfvars solo si necesita cambiar algo.
+# alert_email     = "erianserna1114297@correo.itm.edu.co"
+# enable_cadvisor = false   # si cAdvisor da problemas en Docker Desktop (Windows/macOS)
+# ports = {
+#   wiki         = 6875
+#   grafana      = 3000
+#   prometheus   = 9090
+#   alertmanager = 9093
+#   mailpit      = 8025
+# }

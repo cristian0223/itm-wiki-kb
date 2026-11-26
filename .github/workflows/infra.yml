@@ -1,0 +1,191 @@
+# =============================================================================
+# OPCION B - CI/CD de la Infraestructura como Codigo (Terraform)
+# Corre gratis en el runner de GitHub: valida el codigo, despliega TODO el
+# ambiente con Terraform (wiki + bases de datos + observabilidad), lo prueba,
+# genera las capturas de evidencia y lo destruye al final. Costo: 0.
+# =============================================================================
+name: "IaC - Terraform (Opcion B)"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "app/**"
+      - "scripts/**"
+      - ".github/workflows/infra.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "app/**"
+      - "scripts/**"
+      - ".github/workflows/infra.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VERSION: "1.9.8"
+
+jobs:
+  validar:
+    name: "1. Validar la IaC"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt (revision de formato)
+        run: |
+          if ! terraform -chdir=infra fmt -check -recursive -diff; then
+            echo "::warning title=Formato::Hay archivos de Terraform sin formatear. Ejecute 'terraform fmt -recursive' en infra/."
+          fi
+
+      - name: terraform init
+        run: terraform -chdir=infra init
+
+      - name: terraform validate
+        run: terraform -chdir=infra validate
+
+      - name: Analisis de seguridad de la IaC (Checkov, informativo)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: infra
+          framework: terraform
+          soft_fail: true
+          quiet: true
+
+  desplegar:
+    name: "2. Desplegar, probar, capturar evidencias y destruir"
+    needs: validar
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      EV: evidencias
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Preparar el generador de capturas (Playwright)
+        run: |
+          cd scripts
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Preparar variables
+        run: |
+          echo "TF_VAR_git_sha=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          mkdir -p "$EV"
+          chmod +x scripts/*.sh
+
+      - name: terraform init
+        run: terraform -chdir=infra init
+
+      - name: terraform plan
+        run: terraform -chdir=infra plan -out=tfplan -no-color | tee "$EV/plan.txt"
+
+      - name: "Evidencia 1: validacion y plan"
+        run: |
+          ./scripts/evidence-text.sh plan "$EV/figura-1-iac-plan.txt"
+          node scripts/evidencias.mjs texto "Figura 1. Validacion y plan de la infraestructura" \
+            "terraform validate y terraform plan sobre infra/ (Terraform + proveedor Docker)" \
+            "$EV/figura-1-iac-plan.txt" "$EV/figura-1-iac-plan.png"
+
+      - name: terraform apply
+        run: terraform -chdir=infra apply -auto-approve -no-color tfplan | tee "$EV/apply.txt"
+
+      - name: Prueba de humo de la wiki
+        run: ./scripts/smoke-test.sh http://localhost:6875 "${GITHUB_SHA::7}" | tee "$EV/smoke-test.txt"
+
+      - name: Verificar la observabilidad
+        run: ./scripts/check-observability.sh | tee "$EV/observabilidad.txt"
+
+      - name: "Evidencia 3: contenedores y bases de datos"
+        run: |
+          ./scripts/evidence-text.sh contenedores "$EV/figura-3-contenedores.txt"
+          node scripts/evidencias.mjs texto "Figura 3. Contenedores y bases de datos en ejecucion" \
+            "Servicios creados por Terraform, estado de BookStack y consultas reales a MariaDB y Redis" \
+            "$EV/figura-3-contenedores.txt" "$EV/figura-3-contenedores.png"
+
+      - name: Generar trafico para las metricas
+        run: ./scripts/generate-traffic.sh http://localhost:6875 150
+
+      - name: "Evidencia 4: la wiki en el navegador"
+        run: node scripts/evidencias.mjs wiki http://localhost:6875 "$EV/figura-4-wiki.png"
+
+      - name: "Evidencia 5: dashboard de Grafana"
+        run: |
+          sleep 30
+          node scripts/evidencias.mjs grafana http://localhost:3000 "$EV/figura-5-grafana.png"
+
+      - name: "Evidencia 6: prueba de alertas (falla de Redis -> alerta -> correo)"
+        run: ./scripts/chaos-test.sh "$EV" | tee "$EV/prueba-alertas.txt"
+
+      - name: Logs de los contenedores (si algo falla)
+        if: failure()
+        run: |
+          for c in $(docker ps -a --filter label=project=itm-wiki --format '{{.Names}}'); do
+            echo "::group::$c"; docker logs --tail 80 "$c" 2>&1 || true; echo "::endgroup::"
+          done
+
+      - name: terraform destroy
+        if: always()
+        run: terraform -chdir=infra destroy -auto-approve -no-color | tee "$EV/destroy.txt"
+
+      - name: "Evidencia 7: limpieza total"
+        if: always()
+        run: |
+          ./scripts/evidence-text.sh destruccion "$EV/figura-7-destruccion.txt"
+          node scripts/evidencias.mjs texto "Figura 7. Destruccion y limpieza de los recursos" \
+            "terraform destroy y comprobacion de que no queda ningun contenedor, volumen ni red" \
+            "$EV/figura-7-destruccion.txt" "$EV/figura-7-destruccion.png" || true
+
+      - name: Publicar evidencias
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidencias-${{ github.run_number }}
+          path: evidencias/
+          retention-days: 30
+
+      - name: Resumen
+        if: always()
+        run: |
+          {
+            echo "## Resultado del despliegue efimero"
+            echo ""
+            echo "| Paso | Resultado |"
+            echo "| --- | --- |"
+            echo "| Plan | $(grep -E '^Plan:' "$EV/plan.txt" || echo 'sin datos') |"
+            echo "| Apply | $(grep -E '^Apply complete' "$EV/apply.txt" || echo 'sin datos') |"
+            echo "| Prueba de humo | $(tail -n 1 "$EV/smoke-test.txt" 2>/dev/null || echo 'sin datos') |"
+            echo "| Observabilidad | $(tail -n 1 "$EV/observabilidad.txt" 2>/dev/null || echo 'sin datos') |"
+            echo "| Prueba de alertas | $(tail -n 1 "$EV/prueba-alertas.txt" 2>/dev/null || echo 'sin datos') |"
+            echo "| Destroy | $(grep -E '^Destroy complete' "$EV/destroy.txt" || echo 'sin datos') |"
+            echo ""
+            echo "Las capturas estan en el artefacto **evidencias-${{ github.run_number }}** (parte inferior de esta pagina)."
+          } >> "$GITHUB_STEP_SUMMARY"

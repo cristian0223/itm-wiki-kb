@@ -1,0 +1,108 @@
+# =============================================================================
+# OPCION A - CI/CD de la aplicacion (wiki BookStack)
+#   CI: revisa el Dockerfile, levanta BookStack + MariaDB + Redis y hace la
+#       prueba de humo.
+#   CD: publica la imagen versionada en GitHub Container Registry (GHCR,
+#       gratuito) y comprueba que la imagen publicada arranca.
+# =============================================================================
+name: "App - BookStack CI/CD (Opcion A)"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "docker-compose.yml"
+      - "scripts/smoke-test.sh"
+      - ".github/workflows/app.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "docker-compose.yml"
+      - "scripts/smoke-test.sh"
+      - ".github/workflows/app.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  ci:
+    name: "1. CI - lint y prueba de integracion"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint del Dockerfile (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: app/Dockerfile
+          failure-threshold: error
+
+      - name: Levantar BookStack + MariaDB + Redis
+        run: GIT_SHA=${GITHUB_SHA::7} docker compose up -d --build
+
+      - name: Prueba de humo
+        run: |
+          chmod +x scripts/smoke-test.sh
+          ./scripts/smoke-test.sh http://localhost:6875 "${GITHUB_SHA::7}"
+
+      - name: Logs si falla
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - name: Apagar el entorno de prueba
+        if: always()
+        run: docker compose down -v
+
+  publicar:
+    name: "2. CD - publicar imagen en GHCR"
+    needs: ci
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login en GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construir y publicar la imagen
+        id: img
+        run: |
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE="ghcr.io/${OWNER}/itm-wiki-bookstack"
+          SHORT="${GITHUB_SHA::7}"
+          docker build \
+            --build-arg GIT_SHA="${SHORT}" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            -t "${IMAGE}:${SHORT}" -t "${IMAGE}:latest" app
+          docker push "${IMAGE}:${SHORT}"
+          docker push "${IMAGE}:latest"
+          echo "image=${IMAGE}:${SHORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Comprobar la imagen publicada
+        run: |
+          IMAGE="${{ steps.img.outputs.image }}"
+          docker rmi "$IMAGE" > /dev/null
+          docker pull "$IMAGE"
+          docker run --rm --entrypoint cat "$IMAGE" /itm-build-info.json
+          {
+            echo "## Imagen publicada"
+            echo ""
+            echo "\`${IMAGE}\` (tambien como \`latest\`)"
+          } >> "$GITHUB_STEP_SUMMARY"

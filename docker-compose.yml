@@ -1,0 +1,52 @@
+# Entorno rapido para el CI de la aplicacion (Opcion A).
+# El despliegue completo, con observabilidad, lo hace Terraform en infra/.
+#   GIT_SHA=local docker compose up -d --build   ->   http://localhost:6875
+services:
+  db:
+    image: mariadb:11.4
+    environment:
+      MARIADB_DATABASE: bookstack
+      MARIADB_USER: bookstack
+      MARIADB_PASSWORD: ci-db-pass
+      MARIADB_ROOT_PASSWORD: ci-root-pass
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--requirepass", "ci-redis-pass"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "ci-redis-pass", "--no-auth-warning", "ping"]
+      interval: 5s
+      retries: 10
+
+  bookstack:
+    build:
+      context: ./app
+      args:
+        GIT_SHA: ${GIT_SHA:-local}
+        BUILD_DATE: ${BUILD_DATE:-local}
+    ports:
+      - "127.0.0.1:6875:80"
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: America/Bogota
+      APP_URL: http://localhost:6875
+      APP_LANG: es
+      # Credenciales solo para pruebas efimeras de CI (no se usan en el despliegue de Terraform).
+      APP_KEY: "base64:E9/6MNZyuQoVpCO3IoDN9sV/zIE+GaR0l0jmartpFY4="
+      DB_HOST: db
+      DB_PORT: "3306"
+      DB_DATABASE: bookstack
+      DB_USERNAME: bookstack
+      DB_PASSWORD: ci-db-pass
+      REDIS_SERVERS: redis:6379:0:ci-redis-pass
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

@@ -1,0 +1,47 @@
+#!/usr/bin/with-contenv bash
+# Se ejecuta en cada arranque del contenedor, despues de la configuracion
+# propia de LinuxServer y antes de iniciar nginx/php-fpm.
+# Escribe en el .env de BookStack la configuracion de Redis (cache y sesiones).
+
+set -euo pipefail
+
+ENV_FILE=""
+for candidate in /config/www/.env /app/www/.env; do
+  if [ -e "$candidate" ]; then
+    ENV_FILE="$(readlink -f "$candidate")"
+    break
+  fi
+done
+
+if [ -z "$ENV_FILE" ]; then
+  echo "[itm-wiki] WARN: no se encontro el archivo .env de BookStack"
+  exit 0
+fi
+
+set_env() {
+  local key="$1" value="$2"
+  if grep -qE "^${key}=" "$ENV_FILE"; then
+    sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+  else
+    echo "${key}=${value}" >> "$ENV_FILE"
+  fi
+}
+
+if [ -n "${REDIS_SERVERS:-}" ]; then
+  set_env CACHE_DRIVER redis
+  set_env SESSION_DRIVER redis
+  set_env REDIS_SERVERS "${REDIS_SERVERS}"
+  echo "[itm-wiki] Cache y sesiones configuradas en Redis: ${REDIS_SERVERS%%:*}"
+else
+  echo "[itm-wiki] REDIS_SERVERS no definido: se mantiene cache en archivos"
+fi
+
+if [ -n "${APP_LANG:-}" ]; then
+  set_env APP_LANG "${APP_LANG}"
+fi
+
+if [ -n "${TZ:-}" ]; then
+  set_env APP_TIMEZONE "${TZ}"
+fi
+
+echo "[itm-wiki] Version desplegada: $(cat /itm-build-info.json 2>/dev/null || echo desconocida)"
